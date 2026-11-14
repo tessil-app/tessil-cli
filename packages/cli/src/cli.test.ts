@@ -88,9 +88,11 @@ describe("what is kept on disk", () => {
   it("is readable by its owner only, and not handed to another server", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tessil-test-"));
     process.env.TESSIL_CONFIG_DIR = dir;
+    // This test is about the file. The keychain has its own, below.
+    process.env.TESSIL_NO_KEYCHAIN = "1";
     const config = await import("./config");
     const d = await newDevice();
-    config.saveCredentials({
+    const where = config.saveCredentials({
       apiUrl: config.API_URL,
       deviceId: "d",
       name: "n",
@@ -100,6 +102,7 @@ describe("what is kept on disk", () => {
       secret: d.secret,
       email: "a@b.c",
     });
+    expect(where).toBe("file");
     expect(statSync(join(dir, "credentials.json")).mode & 0o777).toBe(0o600);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
     expect(config.loadCredentials()?.token).toBe(d.token);
@@ -122,5 +125,18 @@ describe("text from elsewhere, before it reaches the terminal", () => {
   it("is applied to a downloaded file's name as well", () => {
     expect(safeFileName("ok\u001b[31m.txt")).toBe("ok[31m.txt");
     expect(safeFileName("invoice\u202Efdp.exe")).toBe("invoicefdp.exe");
+  });
+});
+
+describe("the system keychain", () => {
+  it("refuses values that could break out of a command, without running anything", async () => {
+    const { keychainRead, keychainStore } = await import("./keychain");
+    delete process.env.TESSIL_NO_KEYCHAIN;
+    expect(keychainStore('a" -s other', "c2VjcmV0")).toBe(false);
+    expect(keychainStore("account", 'x"\ndelete-keychain')).toBe(false);
+    expect(keychainStore("account", "has space")).toBe(false);
+    expect(keychainRead("a; rm -rf ~")).toBeNull();
+    process.env.TESSIL_NO_KEYCHAIN = "1";
+    expect(keychainStore("account", "c2VjcmV0")).toBe(false);
   });
 });

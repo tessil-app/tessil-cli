@@ -43,8 +43,11 @@ The result is an **access key**:
 - It works for 90 days and can be renewed or revoked in the dashboard at any time.
   "Sign out everywhere" revokes every access key too.
 
-What the tool remembers is kept in `~/.config/tessil/credentials.json`, readable only by you.
-`tessil logout` revokes the key on the server and removes the file.
+The tool's three secrets (its token, private key and wrapping secret) go into the system
+keychain: Keychain on macOS, the Secret Service on Linux. Where neither can be used, such as
+on Windows for now or on a build server, they go into `~/.config/tessil/credentials.json`,
+readable only by you, and the tool says so. Set `TESSIL_NO_KEYCHAIN=1` to choose the file.
+`tessil logout` revokes the key on the server and removes both.
 
 ## What the tool will not do
 

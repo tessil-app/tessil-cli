@@ -4,6 +4,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { keychainDelete, keychainRead, keychainStore } from "./keychain";
 
 export interface Credentials {
   /** The site the key belongs to, so a key for one server is never sent to another. */
@@ -32,25 +33,52 @@ export function configDir(): string {
 
 const file = () => join(configDir(), "credentials.json");
 
+// The three values that prove who the tool is. Everything else in the file
+// is a name or an address.
+type Secrets = Pick<Credentials, "token" | "privateKey" | "secret">;
+type OnDisk = Omit<Credentials, keyof Secrets> & Partial<Secrets> & { secretsIn?: "keychain" | "file" };
+
+// One keychain entry per server and configuration folder.
+const account = () => `${API_URL}@${Buffer.from(configDir()).toString("base64url")}`;
+
 export function loadCredentials(): Credentials | null {
   if (!existsSync(file())) return null;
   try {
-    const stored = JSON.parse(readFileSync(file(), "utf8")) as Credentials;
+    const stored = JSON.parse(readFileSync(file(), "utf8")) as OnDisk;
     // A key is for one server. Pointing the tool elsewhere must not send it there.
-    return stored.apiUrl === API_URL ? stored : null;
+    if (stored.apiUrl !== API_URL) return null;
+    let secrets: Secrets | null = null;
+    if (stored.secretsIn === "keychain") {
+      const held = keychainRead(account());
+      secrets = held ? (JSON.parse(Buffer.from(held, "base64url").toString("utf8")) as Secrets) : null;
+    } else if (stored.token && stored.privateKey && stored.secret) {
+      secrets = { token: stored.token, privateKey: stored.privateKey, secret: stored.secret };
+    }
+    if (!secrets) return null;
+    const { secretsIn: _where, ...rest } = stored;
+    return { ...rest, ...secrets };
   } catch {
     return null;
   }
 }
 
-export function saveCredentials(credentials: Credentials): void {
+/** Where the secrets ended up, so the caller can say so. */
+export function saveCredentials(credentials: Credentials): "keychain" | "file" {
+  const { token, privateKey, secret, ...plain } = credentials;
+  const packed = Buffer.from(JSON.stringify({ token, privateKey, secret })).toString("base64url");
+  const where = keychainStore(account(), packed) ? "keychain" : "file";
+  const onDisk: OnDisk = where === "keychain" ? { ...plain, secretsIn: where } : { ...credentials, secretsIn: where };
+
   mkdirSync(configDir(), { recursive: true, mode: 0o700 });
   chmodSync(configDir(), 0o700);
   // Readable by this user only, from the moment it exists.
-  writeFileSync(file(), JSON.stringify(credentials, null, 2) + "\n", { mode: 0o600 });
+  rmSync(file(), { force: true });
+  writeFileSync(file(), JSON.stringify(onDisk, null, 2) + "\n", { mode: 0o600 });
   chmodSync(file(), 0o600);
+  return where;
 }
 
 export function clearCredentials(): void {
+  keychainDelete(account());
   rmSync(file(), { force: true });
 }
