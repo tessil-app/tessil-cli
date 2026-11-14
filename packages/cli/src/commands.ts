@@ -44,6 +44,7 @@ import {
   openInBrowser,
   parseHours,
   parseTransferLink,
+  printable,
   safeFileName,
   sleep,
 } from "./util";
@@ -127,7 +128,7 @@ export async function login(options: { name?: string }): Promise<void> {
   if (existing) {
     const self = await getSelf(existing.token).catch(() => null);
     if (self?.status === "active") {
-      say(`Already paired with ${existing.email} as "${self.device.name}". Run \`tessil logout\` first to pair again.`);
+      say(`Already paired with ${printable(existing.email)} as "${printable(self.device.name)}". Run \`tessil logout\` first to pair again.`);
       return;
     }
   }
@@ -141,7 +142,11 @@ export async function login(options: { name?: string }): Promise<void> {
     throw explain(err);
   }
 
-  const url = `${WEB_URL}/dashboard/settings/access?code=${registered.pairingCode}`;
+  // The code comes from the server and ends up in an address and on screen.
+  if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(registered.pairingCode)) {
+    throw new UserError("The server answered with something that is not a pairing code.");
+  }
+  const url = `${WEB_URL}/dashboard/settings/access?code=${encodeURIComponent(registered.pairingCode)}`;
   say("To let this program act for your account, approve it in your browser:");
   say();
   say(`  ${url}`);
@@ -175,8 +180,8 @@ export async function login(options: { name?: string }): Promise<void> {
         email: self.account.email,
       });
       say();
-      say(`Paired with ${self.account.email} as "${self.device.name}".`);
-      say(`It may: ${self.device.permissions.join(", ")}.`);
+      say(`Paired with ${printable(self.account.email)} as "${printable(self.device.name)}".`);
+      say(`It may: ${printable(self.device.permissions.join(", "))}.`);
       return;
     }
   }
@@ -198,9 +203,9 @@ export async function logout(): Promise<void> {
 export async function whoami(): Promise<void> {
   const credentials = need();
   const self = await active(credentials);
-  out(`${self.account.email} (${self.account.tier})`);
-  say(`Access key   ${self.device.name}`);
-  say(`May          ${self.device.permissions.join(", ")}`);
+  out(`${printable(self.account.email)} (${printable(self.account.tier)})`);
+  say(`Access key   ${printable(self.device.name)}`);
+  say(`May          ${printable(self.device.permissions.join(", "))}`);
   if (self.device.expiresAt) {
     const days = Math.ceil((new Date(self.device.expiresAt).getTime() - Date.now()) / 86_400_000);
     say(`Works for    ${days} more ${days === 1 ? "day" : "days"}`);
@@ -404,14 +409,15 @@ export async function get(link: string, options: { out?: string }): Promise<void
     meta.encryptedTitle && meta.encryptedTitleIv
       ? await decryptString(meta.encryptedTitle, meta.encryptedTitleIv, key).catch(() => null)
       : null;
-  if (title) say(`"${title}"`);
+  if (title) say(`"${printable(title)}"`);
 
   for (const file of files) {
     // The name was chosen by whoever sent this. It is never allowed to
     // point outside the folder, and never replaces a file already there.
-    const stored = await decryptFilename(file.encryptedName, file.encryptedNameIv, key).catch(() => "file");
-    let target = join(folder, safeFileName(stored));
-    for (let n = 1; existsSync(target); n++) target = join(folder, `${n}-${safeFileName(stored)}`);
+    // From here on only the cleaned name is used, on disk and on screen.
+    const stored = safeFileName(await decryptFilename(file.encryptedName, file.encryptedNameIv, key).catch(() => "file"));
+    let target = join(folder, stored);
+    for (let n = 1; existsSync(target); n++) target = join(folder, `${n}-${stored}`);
 
     const { downloadUrl } = await api.getDownloadUrl(file.id, accessToken).catch((err) => {
       throw explain(err);
@@ -487,7 +493,7 @@ export async function list(options: { json?: boolean }): Promise<void> {
         formatSize(r.size).padEnd(9),
         `${r.downloads} ${r.downloads === 1 ? "download" : "downloads"}`.padEnd(12),
         lifetime.padEnd(9),
-        r.title ?? (r.complete ? "" : "(not finished)"),
+        r.title ? printable(r.title) : r.complete ? "" : "(not finished)",
       ].join("  "),
     );
   }

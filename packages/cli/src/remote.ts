@@ -2,7 +2,7 @@
 
 import { ApiClient, type OwnedTransferSummary } from "@tessil/core/api/client";
 import { API_URL, type Credentials } from "./config";
-import { UserError } from "./util";
+import { UserError, printable } from "./util";
 
 export interface SelfActive {
   status: "active";
@@ -87,9 +87,9 @@ export function explain(err: unknown): Error {
       return new UserError("This access key no longer works. Run `tessil login` to pair again.");
     }
     if (e.code === "device_forbidden") {
-      return new UserError(`${e.message} Change what this key may do under Settings, Access keys.`);
+      return new UserError(`${printable(e.message)} Change what this key may do under Settings, Access keys.`);
     }
-    return new UserError(e.message);
+    return new UserError(printable(e.message));
   }
   return err instanceof Error ? err : new Error(String(err));
 }

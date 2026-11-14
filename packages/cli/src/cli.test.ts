@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { base64UrlToBytes } from "@tessil/core/crypto/base64url";
 import { newDevice, unwrapTransferKey, wrapTransferKey } from "./device";
-import { describeHours, formatSize, parseHours, parseTransferLink, safeFileName } from "./util";
+import { describeHours, formatSize, parseHours, parseTransferLink, printable, safeFileName } from "./util";
 
 describe("a new access key", () => {
   it("has a token, a P-256 key pair, a secret and a fingerprint, all different each time", async () => {
@@ -108,5 +108,19 @@ describe("what is kept on disk", () => {
     expect(config.loadCredentials()).toBeNull();
     config.clearCredentials();
     expect(config.loadCredentials()).toBeNull();
+  });
+});
+
+describe("text from elsewhere, before it reaches the terminal", () => {
+  it("loses anything that could redraw the screen or disguise a name", () => {
+    expect(printable("report\u001b[2J\u001b[1;1Hall good")).toBe("report[2J[1;1Hall good");
+    expect(printable("a\u0007b\u009bc\rd")).toBe("abcd");
+    expect(printable("invoice\u202Efdp.exe")).toBe("invoicefdp.exe");
+    expect(printable("Jaaropgave \u00e9\u00e9n \u6587 \u{1F4C4}")).toBe("Jaaropgave \u00e9\u00e9n \u6587 \u{1F4C4}");
+  });
+
+  it("is applied to a downloaded file's name as well", () => {
+    expect(safeFileName("ok\u001b[31m.txt")).toBe("ok[31m.txt");
+    expect(safeFileName("invoice\u202Efdp.exe")).toBe("invoicefdp.exe");
   });
 });

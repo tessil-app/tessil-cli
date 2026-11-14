@@ -40,20 +40,44 @@ export function parseTransferLink(input: string): ParsedLink | null {
 
 /** A file name with nothing that could place it outside the folder it is saved in. */
 export function safeFileName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001f\u007f]/g, "")
+  const cleaned = printable(name)
     .replace(/[/\\]/g, "_")
     .replace(/^\.+/, "_")
     .trim();
   return cleaned.length > 0 ? cleaned.slice(0, 240) : "file";
 }
 
-/** Opens a page in the person's browser. Quietly does nothing where there is none. */
-export function openInBrowser(url: string): void {
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+/**
+ * Text from somewhere else, made safe to print: a title or file name from a
+ * link, a name or message from the server. Control characters could move
+ * the cursor, recolour or rewrite what the terminal shows; the direction
+ * overrides could make a name read as something it is not.
+ */
+export function printable(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+}
+
+/**
+ * Opens a page in the person's browser. Quietly does nothing where there is
+ * none, or when the address is not a plain web address. Nothing here goes
+ * through a shell.
+ */
+export function openInBrowser(address: string): void {
+  let url: URL;
   try {
-    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    url = new URL(address);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return;
+  const [command, args] =
+    process.platform === "darwin"
+      ? ["open", [url.href]]
+      : process.platform === "win32"
+        ? ["rundll32", ["url.dll,FileProtocolHandler", url.href]]
+        : ["xdg-open", [url.href]];
+  try {
+    const child = spawn(command, args, { stdio: "ignore", detached: true, shell: false });
     child.on("error", () => {});
     child.unref();
   } catch {
