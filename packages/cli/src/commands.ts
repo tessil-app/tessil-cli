@@ -1,0 +1,513 @@
+// What each command does. Printing for a person happens here; anything
+// another program might read goes to standard output, the rest to standard
+// error.
+
+import { createWriteStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { hostname } from "node:os";
+import { basename, join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { ApiError } from "@tessil/core/api/client";
+import { bytesToBase64Url } from "@tessil/core/crypto/base64url";
+import { decryptFile, decryptFilename, decryptString } from "@tessil/core/crypto/decrypt";
+import { encryptFilename, encryptString } from "@tessil/core/crypto/encrypt";
+import { exportKey, generateKey, importKey } from "@tessil/core/crypto/key";
+import { encryptFileStream, isStreamingFormat, plaintextSize, streamingDecrypt } from "@tessil/core/crypto/streaming";
+import {
+  deriveTransferPassword,
+  isProtectedFragment,
+  protectTransferKey,
+  saltFromFragment,
+  unwrapTransferKey as openProtectedFragment,
+} from "@tessil/core/crypto/transferPassword";
+import { blockedKind } from "@tessil/core/upload/fileTypeCheck";
+import { uploadEncryptedStreamMultipart } from "@tessil/core/upload/multipart";
+import { runFiles } from "@tessil/core/upload/pool";
+import { API_URL, WEB_URL, clearCredentials, loadCredentials, saveCredentials, type Credentials } from "./config";
+import { newDevice, unwrapTransferKey, wrapTransferKey } from "./device";
+import {
+  anonymousClient,
+  clientFor,
+  deleteOwnTransfer,
+  explain,
+  getSelf,
+  listOwnTransfers,
+  registerDevice,
+  signOut,
+  type SelfActive,
+} from "./remote";
+import {
+  UserError,
+  askHidden,
+  describeHours,
+  formatSize,
+  openInBrowser,
+  parseHours,
+  parseTransferLink,
+  printable,
+  safeFileName,
+  sleep,
+} from "./util";
+
+const TITLE_MAX = 100;
+const MIN_PASSWORD_LENGTH = 8;
+const PIECE_BYTES = 256 * 1024;
+const STRETCH_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A stored file as a stream, read with ranged requests of a fixed size and
+ * handed on in small pieces. Nothing is asked for until it is wanted.
+ */
+function rangedBody(url: string, size: number, label: string): ReadableStream<Uint8Array> {
+  let offset = 0;
+  let pending: Uint8Array | null = null;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (!pending) {
+        if (offset >= size) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(offset + STRETCH_BYTES, size) - 1;
+        const response = await fetch(url, { headers: { Range: `bytes=${offset}-${end}` } });
+        if (response.status !== 206 && !(response.status === 200 && offset === 0 && end === size - 1)) {
+          throw new UserError(`Could not download ${label} (${response.status}).`);
+        }
+        pending = new Uint8Array(await response.arrayBuffer());
+        if (pending.length !== end - offset + 1) throw new UserError(`The download of ${label} was cut short.`);
+        offset = end + 1;
+      }
+      const piece = pending.subarray(0, PIECE_BYTES);
+      pending = pending.length > PIECE_BYTES ? pending.subarray(PIECE_BYTES) : null;
+      controller.enqueue(piece);
+    },
+  });
+}
+
+/** `first`, then the rest of `stream`. For looking at the start of a stream without losing it. */
+function prepend(first: Uint8Array, stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  let sent = first.length === 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(first);
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
+}
+const say = (line = "") => process.stderr.write(`${line}\n`);
+const out = (line: string) => process.stdout.write(`${line}\n`);
+
+function need(): Credentials {
+  const credentials = loadCredentials();
+  if (!credentials) throw new UserError("Not paired with an account yet. Run `tessil login` first.");
+  return credentials;
+}
+
+async function active(credentials: Credentials): Promise<SelfActive> {
+  try {
+    const self = await getSelf(credentials.token);
+    if (self.status !== "active") throw new UserError("This access key is still waiting to be approved.");
+    return self;
+  } catch (err) {
+    throw explain(err);
+  }
+}
+
+// ─── login, logout, whoami ──────────────────────────────────────────────────
+
+export async function login(options: { name?: string }): Promise<void> {
+  const existing = loadCredentials();
+  if (existing) {
+    const self = await getSelf(existing.token).catch(() => null);
+    if (self?.status === "active") {
+      say(`Already paired with ${printable(existing.email)} as "${printable(self.device.name)}". Run \`tessil logout\` first to pair again.`);
+      return;
+    }
+  }
+
+  const device = await newDevice();
+  const name = (options.name ?? `${hostname()}, tessil`).slice(0, 80);
+  let registered;
+  try {
+    registered = await registerDevice({ name, publicKey: device.publicKey, tokenHash: device.tokenHash });
+  } catch (err) {
+    throw explain(err);
+  }
+
+  // The code comes from the server and ends up in an address and on screen.
+  if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(registered.pairingCode)) {
+    throw new UserError("The server answered with something that is not a pairing code.");
+  }
+  const url = `${WEB_URL}/dashboard/settings/access?code=${encodeURIComponent(registered.pairingCode)}`;
+  say("To let this program act for your account, approve it in your browser:");
+  say();
+  say(`  ${url}`);
+  say();
+  say(`  Code            ${registered.pairingCode}`);
+  say(`  This key        ${device.fingerprint}`);
+  say();
+  say("The page shows the same key code. If it differs, do not approve.");
+  say("Waiting for approval (ten minutes at most)…");
+  openInBrowser(url);
+
+  const deadline = new Date(registered.pairingExpiresAt).getTime();
+  while (Date.now() < deadline) {
+    await sleep(2000);
+    let self;
+    try {
+      self = await getSelf(device.token);
+    } catch {
+      // Gone: the code ran out or the request was turned down.
+      break;
+    }
+    if (self.status === "active") {
+      saveCredentials({
+        apiUrl: API_URL,
+        deviceId: self.device.id,
+        name: self.device.name,
+        token: device.token,
+        privateKey: device.privateKey,
+        publicKey: device.publicKey,
+        secret: device.secret,
+        email: self.account.email,
+      });
+      say();
+      say(`Paired with ${printable(self.account.email)} as "${printable(self.device.name)}".`);
+      say(`It may: ${printable(self.device.permissions.join(", "))}.`);
+      return;
+    }
+  }
+  throw new UserError("Not approved in time. Run `tessil login` again.");
+}
+
+export async function logout(): Promise<void> {
+  const credentials = loadCredentials();
+  if (!credentials) {
+    say("Not paired.");
+    return;
+  }
+  // The key is revoked on the server too, so a copy of the file is worthless.
+  await signOut(credentials.token).catch(() => {});
+  clearCredentials();
+  say("Signed out. This access key no longer works.");
+}
+
+export async function whoami(): Promise<void> {
+  const credentials = need();
+  const self = await active(credentials);
+  out(`${printable(self.account.email)} (${printable(self.account.tier)})`);
+  say(`Access key   ${printable(self.device.name)}`);
+  say(`May          ${printable(self.device.permissions.join(", "))}`);
+  if (self.device.expiresAt) {
+    const days = Math.ceil((new Date(self.device.expiresAt).getTime() - Date.now()) / 86_400_000);
+    say(`Works for    ${days} more ${days === 1 ? "day" : "days"}`);
+  }
+  say(`Server       ${API_URL}`);
+}
+
+// ─── send ───────────────────────────────────────────────────────────────────
+
+export interface SendOptions {
+  expires?: string;
+  password?: boolean;
+  maxDownloads?: number;
+  title?: string;
+  /** Print only the link, for use in a script. */
+  quiet?: boolean;
+}
+
+/** A file on disk as the shared code wants it: a Blob with a name. */
+function fileFromDisk(path: string): { blob: Blob; name: string; size: number } {
+  const full = resolve(path);
+  if (!existsSync(full)) throw new UserError(`No such file: ${path}`);
+  const stat = statSync(full);
+  if (stat.isDirectory()) throw new UserError(`${path} is a folder. Put it in an archive first, then send that.`);
+  return { blob: Bun.file(full), name: basename(full), size: stat.size };
+}
+
+export async function send(paths: string[], options: SendOptions): Promise<string> {
+  if (paths.length === 0) throw new UserError("Nothing to send. Usage: tessil send <file> [more files]");
+  const credentials = need();
+  const self = await active(credentials);
+  const api = clientFor(credentials);
+  const files = paths.map(fileFromDisk);
+
+  const allowed = self.caps.allowedExpiryHours;
+  const longest = Math.max(...allowed);
+  let hours = Math.min(longest, 168);
+  if (options.expires) {
+    const wanted = parseHours(options.expires);
+    if (wanted === null) throw new UserError(`"${options.expires}" is not a duration. Use something like 12h, 3d or 2w.`);
+    if (!allowed.includes(wanted)) {
+      throw new UserError(
+        `Your plan allows these lifetimes: ${allowed.map(describeHours).join(", ")}. "${options.expires}" is not one of them.`,
+      );
+    }
+    hours = wanted;
+  } else if (!allowed.includes(hours)) {
+    hours = longest;
+  }
+
+  const total = files.reduce((sum, f) => sum + f.size, 0);
+  for (const file of files) {
+    if (file.size === 0) throw new UserError(`${file.name} is empty.`);
+    if (file.size > self.caps.maxFileSize) {
+      throw new UserError(`${file.name} is ${formatSize(file.size)}. Your plan allows ${formatSize(self.caps.maxFileSize)} per file.`);
+    }
+    // The same rule as the website: no programs and no scripts.
+    const blocked = await blockedKind(file.blob);
+    if (blocked) {
+      throw new UserError(
+        `${file.name} is ${blocked === "script" ? "a script" : "a program"}, which Tessil does not carry as it is. Put it in an archive and send that.`,
+      );
+    }
+  }
+  if (total > self.caps.maxTransferSize) {
+    throw new UserError(`${formatSize(total)} in one transfer. Your plan allows ${formatSize(self.caps.maxTransferSize)}.`);
+  }
+
+  let password: string | undefined;
+  if (options.password) {
+    password = await askHidden("Password for the link: ");
+    if (password.length < MIN_PASSWORD_LENGTH) throw new UserError(`Use at least ${MIN_PASSWORD_LENGTH} characters.`);
+    if ((await askHidden("Once more: ")) !== password) throw new UserError("Those two did not match.");
+  }
+
+  const key = await generateKey();
+  const protectedKey = password ? await protectTransferKey(key, password) : null;
+  const title = options.title?.trim().slice(0, TITLE_MAX);
+  const encryptedTitle = title ? await encryptString(title, key) : null;
+
+  let transferId: string;
+  try {
+    const created = await api.createTransfer(
+      hours,
+      protectedKey ? { verifier: protectedKey.verifier, salt: protectedKey.salt } : undefined,
+      options.maxDownloads ?? null,
+      encryptedTitle ? { encryptedTitle: encryptedTitle.ciphertext, encryptedTitleIv: encryptedTitle.iv } : null,
+    );
+    transferId = created.transferId;
+  } catch (err) {
+    throw explain(err);
+  }
+
+  const progress = new Array<number>(files.length).fill(0);
+  const report = () => {
+    if (options.quiet || !process.stderr.isTTY) return;
+    const done = progress.reduce((sum, p, i) => sum + (p / 100) * files[i].size, 0);
+    process.stderr.write(`\rEncrypting and uploading  ${Math.floor((done / total) * 100)}%   `);
+  };
+
+  try {
+    await runFiles(
+      files,
+      (file) => file.size,
+      async (file, i, signal) => {
+        const { encryptedName, iv } = await encryptFilename(file.name, key);
+        const encryptor = encryptFileStream(file.blob as File, key);
+        const init = await api.initMultipartUpload({
+          transferId,
+          contentType: file.blob.type || "application/octet-stream",
+          encryptedName,
+          encryptedNameIv: iv,
+          fileIv: encryptor.ivB64,
+          size: encryptor.size,
+        });
+        await uploadEncryptedStreamMultipart({
+          uploadId: init.uploadId,
+          fileId: init.fileId,
+          transferId,
+          r2Key: init.r2Key,
+          source: encryptor.stream,
+          partUrls: init.partUrls,
+          signal,
+          api,
+          onProgress: (p) => {
+            progress[i] = p.percent;
+            report();
+          },
+        });
+        progress[i] = 100;
+        report();
+      },
+    );
+
+    const raw = new Uint8Array(await crypto.subtle.exportKey("raw", key));
+    const wrappedKey = await wrapTransferKey(credentials.secret, credentials.deviceId, transferId, raw);
+    raw.fill(0);
+    await api.completeTransfer(transferId, { wrappedKey });
+  } catch (err) {
+    await api.abortTransfer(transferId).catch(() => {});
+    if (!options.quiet && process.stderr.isTTY) process.stderr.write("\n");
+    throw explain(err);
+  }
+  if (!options.quiet && process.stderr.isTTY) process.stderr.write("\r\x1b[K");
+
+  const link = `${WEB_URL}/d/${transferId}#${protectedKey ? protectedKey.fragment : await exportKey(key)}`;
+  if (!options.quiet) {
+    say(`Sent ${files.length === 1 ? files[0].name : `${files.length} files`} (${formatSize(total)}), encrypted on this machine.`);
+    say(`The link works for ${describeHours(hours)}${options.maxDownloads ? `, ${options.maxDownloads} ${options.maxDownloads === 1 ? "download" : "downloads"}` : ""}${password ? ", with the password you chose" : ""}.`);
+    say();
+  }
+  out(link);
+  return link;
+}
+
+// ─── get ────────────────────────────────────────────────────────────────────
+
+export async function get(link: string, options: { out?: string }): Promise<void> {
+  // Fetching needs nothing from the account, but the tool is for accounts.
+  need();
+  const parsed = parseTransferLink(link);
+  if (!parsed) throw new UserError("That is not a Tessil link. It should look like https://tessil.app/d/…#…");
+  const api = anonymousClient();
+  const folder = resolve(options.out ?? ".");
+  mkdirSync(folder, { recursive: true });
+
+  let meta;
+  try {
+    meta = await api.getTransferMetadata(parsed.id);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+      throw new UserError("That transfer no longer exists. It may have expired or been deleted.");
+    }
+    throw explain(err);
+  }
+
+  let key: CryptoKey;
+  let accessToken: string | undefined;
+  if (isProtectedFragment(parsed.fragment)) {
+    const password = await askHidden("Password for this link: ");
+    const derived = await deriveTransferPassword(password, saltFromFragment(parsed.fragment));
+    try {
+      key = await openProtectedFragment(parsed.fragment, derived.wrappingKey);
+      meta = await api.verifyTransferPassword(parsed.id, derived.verifier);
+      accessToken = meta.accessToken;
+    } catch {
+      throw new UserError("That password is not right.");
+    }
+  } else {
+    if (meta.passwordRequired) throw new UserError("This link is from an older version of Tessil and needs a password; open it in a browser.");
+    try {
+      key = await importKey(parsed.fragment);
+    } catch {
+      throw new UserError("The part of the link after # is damaged. Copy the whole link again.");
+    }
+  }
+
+  const files = meta.files ?? [];
+  if (files.length === 0) throw new UserError("That transfer has no files.");
+  const title =
+    meta.encryptedTitle && meta.encryptedTitleIv
+      ? await decryptString(meta.encryptedTitle, meta.encryptedTitleIv, key).catch(() => null)
+      : null;
+  if (title) say(`"${printable(title)}"`);
+
+  for (const file of files) {
+    // The name was chosen by whoever sent this. It is never allowed to
+    // point outside the folder, and never replaces a file already there.
+    // From here on only the cleaned name is used, on disk and on screen.
+    const stored = safeFileName(await decryptFilename(file.encryptedName, file.encryptedNameIv, key).catch(() => "file"));
+    let target = join(folder, stored);
+    for (let n = 1; existsSync(target); n++) target = join(folder, `${n}-${stored}`);
+
+    const { downloadUrl } = await api.getDownloadUrl(file.id, accessToken).catch((err) => {
+      throw explain(err);
+    });
+    // Fetched a stretch at a time. Memory then stays at one stretch however
+    // fast the connection is and however large the file.
+    const rest = rangedBody(downloadUrl, file.size, stored);
+    const reader = rest.getReader();
+    const first = await reader.read();
+    const head = first.value ?? new Uint8Array(0);
+    reader.releaseLock();
+    const body = prepend(head, rest);
+
+    if (isStreamingFormat(head)) {
+      await pipeline(Readable.fromWeb(streamingDecrypt(body, file.size, key) as never), createWriteStream(target, { flags: "wx" }));
+      say(`  ${target}  (${formatSize(plaintextSize(file.size))})`);
+    } else {
+      const whole = await new Response(body).arrayBuffer();
+      const plain = await decryptFile(whole, file.fileIv, key);
+      await Bun.write(target, plain);
+      say(`  ${target}  (${formatSize(plain.size)})`);
+    }
+    out(target);
+  }
+}
+
+// ─── list, revoke ───────────────────────────────────────────────────────────
+
+export async function list(options: { json?: boolean }): Promise<void> {
+  const credentials = need();
+  let res;
+  try {
+    res = await listOwnTransfers(credentials.token);
+  } catch (err) {
+    throw explain(err);
+  }
+  const rows = [];
+  for (const t of res.transfers) {
+    let title: string | null = null;
+    const raw = t.wrappedKey
+      ? await unwrapTransferKey(credentials.secret, credentials.deviceId, t.id, t.wrappedKey)
+      : null;
+    if (raw && t.encryptedTitle && t.encryptedTitleIv) {
+      const key = await importKey(bytesToBase64Url(raw));
+      title = await decryptString(t.encryptedTitle, t.encryptedTitleIv, key).catch(() => null);
+    }
+    rows.push({
+      id: t.id,
+      title,
+      files: t.fileCount,
+      size: t.totalBytes,
+      downloads: t.downloadCount,
+      expiresAt: t.expiresAt,
+      complete: t.isCompleted,
+      password: t.hasPassword,
+    });
+  }
+  if (options.json) {
+    out(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (rows.length === 0) {
+    say("This access key has not sent anything that still exists.");
+    return;
+  }
+  for (const r of rows) {
+    const left = Math.ceil((new Date(r.expiresAt).getTime() - Date.now()) / 3_600_000);
+    const lifetime = left <= 0 ? "expired" : left < 48 ? `${left}h left` : `${Math.round(left / 24)}d left`;
+    out(
+      [
+        r.id,
+        `${r.files} ${r.files === 1 ? "file" : "files"}`.padEnd(8),
+        formatSize(r.size).padEnd(9),
+        `${r.downloads} ${r.downloads === 1 ? "download" : "downloads"}`.padEnd(12),
+        lifetime.padEnd(9),
+        r.title ? printable(r.title) : r.complete ? "" : "(not finished)",
+      ].join("  "),
+    );
+  }
+}
+
+export async function revoke(id: string): Promise<void> {
+  const credentials = need();
+  const transferId = parseTransferLink(id)?.id ?? id;
+  if (!/^[A-Za-z0-9_-]{21}$/.test(transferId)) throw new UserError("Give the transfer's ID, as shown by `tessil list`.");
+  try {
+    await deleteOwnTransfer(credentials.token, transferId);
+  } catch (err) {
+    const e = explain(err);
+    throw e.message === "Not found" ? new UserError("No transfer of this access key has that ID.") : e;
+  }
+  say("Deleted. The link no longer works.");
+}
