@@ -1,0 +1,13 @@
+{
+  "name": "@tessil/core",
+  "version": "0.0.0",
+  "description": "The encryption, sealing and upload code behind tessil.app. The website and the command-line tool share it.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": { "./*": "./src/*.ts" },
+  "dependencies": {
+    "@hpke/common": "1.10.1",
+    "@hpke/core": "1.9.0",
+    "hash-wasm": "4.12.0"
+  }
+}
