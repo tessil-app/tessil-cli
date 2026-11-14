@@ -215,7 +215,7 @@ export async function login(options: { name?: string }): Promise<void> {
       break;
     }
     if (self.status === "active") {
-      saveCredentials({
+      const where = saveCredentials({
         apiUrl: API_URL,
         deviceId: self.device.id,
         name: self.device.name,
@@ -232,6 +232,11 @@ export async function login(options: { name?: string }): Promise<void> {
       say();
       say(`Paired with ${printable(self.account.email)} as "${printable(self.device.name)}".`);
       say(`It may: ${printable(self.device.permissions.join(", "))}.`);
+      say(
+        where === "keychain"
+          ? "Its secrets are in your system keychain."
+          : "Its secrets are in a file only you can read; this system has no keychain the tool can use.",
+      );
       return;
     }
   }
