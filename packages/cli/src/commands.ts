@@ -13,6 +13,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -131,7 +132,7 @@ export async function saveEncryptedFile(
       written = plaintextSize(storedSize);
     } else {
       const plain = await decryptFile(await new Response(body).arrayBuffer(), fileIv, key);
-      await Bun.write(part, plain);
+      writeFileSync(part, new Uint8Array(await plain.arrayBuffer()), { flag: "wx" });
       written = plain.size;
     }
     if (existsSync(target)) throw new UserError(`${label} is already there; nothing was replaced.`);
@@ -292,6 +293,44 @@ export interface SendOptions {
   quiet?: boolean;
 }
 
+// Shown to the person downloading, next to the file's name. Nothing depends
+// on it; anything not listed is "a file".
+const CONTENT_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  zip: "application/zip",
+  gz: "application/gzip",
+  tar: "application/x-tar",
+  json: "application/json",
+  txt: "text/plain",
+  log: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  html: "text/html",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  heic: "image/heic",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+export function contentTypeOf(path: string): string {
+  const dot = path.lastIndexOf(".");
+  const extension = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
+  return CONTENT_TYPES[extension] ?? "application/octet-stream";
+}
+
 export interface DiskFile {
   name: string;
   size: number;
@@ -305,10 +344,11 @@ export interface DiskFile {
 /**
  * A file on disk as the shared code wants it.
  *
- * It is read with Node's stream, not with `Bun.file(...).stream()`. In Bun
- * 1.3, finishing the latter while data is arriving on standard input ends
- * standard input, and standard input is what the MCP server lives on: it
- * quit after every upload. `fs.openAsBlob` behaves the same way.
+ * It is read with Node's stream, which works the same under Node and Bun.
+ * Not with Bun's own file stream: in Bun 1.3, finishing one of those while
+ * data is arriving on standard input ends standard input, and standard
+ * input is what the MCP server lives on. It quit after every upload.
+ * `fs.openAsBlob` behaves the same way there.
  */
 export function fileFromDisk(path: string): DiskFile {
   const full = resolve(path);
@@ -325,7 +365,7 @@ export function fileFromDisk(path: string): DiskFile {
   return {
     name: basename(full),
     size: stat.size,
-    type: Bun.file(full).type,
+    type: contentTypeOf(full),
     head: new Blob([start]),
     asFile: {
       size: stat.size,

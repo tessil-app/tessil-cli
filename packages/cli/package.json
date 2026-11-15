@@ -1,15 +1,40 @@
 {
   "name": "tessil",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Send and fetch end-to-end encrypted files from a terminal. The command-line tool for tessil.app.",
   "license": "AGPL-3.0-only",
   "type": "module",
   "bin": {
-    "tessil": "./src/main.ts"
+    "tessil": "./dist/tessil.js"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2",
+  "files": [
+    "dist/tessil.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tessil-app/tessil-cli.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://tessil.app",
+  "keywords": [
+    "encryption",
+    "end-to-end",
+    "file-transfer",
+    "cli",
+    "mcp"
+  ],
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@tessil/core": "workspace:*",
-    "zod": "^4.6.7"
+    "zod": "4.6.7"
+  },
+  "scripts": {
+    "build": "bun build src/main.ts --target node --outfile dist/tessil.js",
+    "prepack": "bun run build && cp ../../README.md ../../LICENSE ."
   }
 }

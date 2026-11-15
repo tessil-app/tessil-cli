@@ -1,0 +1,220 @@
+name: release
+
+# A tag like v0.1.0 builds the program for every system, publishes the
+# downloads with their checksums, then npm and the Homebrew formula.
+# On a pull request that touches the release files it only builds, so a
+# change here is tried before a real release depends on it.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "install.sh"
+      - "scripts/release/**"
+      - "packages/cli/package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun test
+      - name: The tag is the version in the package
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have="$(bun -e 'console.log(require("./packages/cli/package.json").version)')"
+          if [ "$want" != "$have" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match packages/cli version $have" >&2
+            exit 1
+          fi
+      - name: The npm build runs under Node
+        run: |
+          bun run build:npm
+          node packages/cli/dist/tessil.js --version
+          node packages/cli/dist/tessil.js help > /dev/null
+
+  binaries:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: bun-darwin-arm64, name: tessil-darwin-arm64, run: true }
+          - { os: macos-latest, target: bun-darwin-x64, name: tessil-darwin-x64, run: false }
+          - { os: ubuntu-latest, target: bun-linux-x64, name: tessil-linux-x64, run: true }
+          - { os: ubuntu-latest, target: bun-linux-arm64, name: tessil-linux-arm64, run: false }
+          - { os: ubuntu-latest, target: bun-windows-x64, name: tessil-windows-x64, run: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+
+      - name: Build
+        run: |
+          mkdir -p out
+          exe=tessil
+          case "${{ matrix.target }}" in *windows*) exe=tessil.exe ;; esac
+          bun build packages/cli/src/main.ts --compile --target=${{ matrix.target }} --outfile "out/$exe"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+
+      # With the certificate present: a Developer ID signature and Apple's
+      # notarisation, so macOS runs a downloaded copy without objection.
+      # Without it: an ad-hoc signature, which is enough for Homebrew and
+      # for a copy built on the same machine, and the job says which it was.
+      - name: Sign for macOS
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ]; then
+            codesign --force --sign - out/tessil
+            echo "::notice::${{ matrix.name }} is signed ad hoc. Add the Apple secrets for a Developer ID signature."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 16)"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain"
+          rm "$RUNNER_TEMP/cert.p12"
+
+          codesign --force --timestamp --options runtime \
+            --entitlements scripts/release/entitlements.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" out/tessil
+          codesign --verify --strict --verbose=2 out/tessil
+
+          ditto -c -k out/tessil "$RUNNER_TEMP/notarise.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarise.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          security delete-keychain "$keychain"
+
+      - name: It runs
+        if: matrix.run
+        run: |
+          ./out/$EXE --version
+          ./out/$EXE help > /dev/null
+
+      - name: Package
+        run: |
+          cd out
+          case "${{ matrix.target }}" in
+            *windows*) zip -q "${{ matrix.name }}.zip" "$EXE" ;;
+            *) tar -czf "${{ matrix.name }}.tar.gz" "$EXE" ;;
+          esac
+          rm "$EXE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  # The install script against what was just built, served from a local
+  # folder in place of a release.
+  install-script:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist && sha256sum tessil-* > SHA256SUMS && cat SHA256SUMS
+          python3 -m http.server 8765 > /dev/null 2>&1 &
+          sleep 1
+          cd ..
+          sed 's|base="https://github.com/$REPO/releases/latest/download"|base="http://localhost:8765"|' install.sh > /tmp/install-local.sh
+          TESSIL_INSTALL_DIR="$PWD/bin" sh /tmp/install-local.sh
+          ./bin/tessil --version
+          # A download that does not match its checksum is refused.
+          echo "tampered" >> dist/tessil-linux-x64.tar.gz
+          if TESSIL_INSTALL_DIR="$PWD/bin2" sh /tmp/install-local.sh; then
+            echo "a tampered download was installed" >&2
+            exit 1
+          fi
+          test ! -e bin2/tessil
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, install-script]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum tessil-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* install.sh --title "$GITHUB_REF_NAME" --generate-notes
+
+      - name: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::No NPM_TOKEN secret, so nothing was published to npm."
+            exit 0
+          fi
+          cd packages/cli
+          npm publish --provenance --access public
+
+      - name: Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::No HOMEBREW_TAP_TOKEN secret, so the Homebrew formula was not updated."
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/tessil-app/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          bun run scripts/release/formula.ts "$version" dist/SHA256SUMS > tap/Formula/tessil.rb
+          cd tap
+          git config user.name "tessil-release"
+          git config user.email "release@tessil.app"
+          git add Formula/tessil.rb
+          git commit -m "tessil $version"
+          git push
