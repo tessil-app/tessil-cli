@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // tessil: send and fetch end-to-end encrypted files from a terminal.
 
-import { get, list, login, logout, revoke, send, whoami } from "./commands";
+import { get, list, login, logout, revoke, saveEncryptedFile, send, whoami } from "./commands";
+import { deliveries, portals, pull } from "./portals";
 import { UserError } from "./util";
 
 const HELP = `tessil: end-to-end encrypted file transfer, from a terminal.
@@ -18,6 +19,10 @@ Usage
   tessil get <link> [--out <dir>]   Download and decrypt a link
   tessil list [--json]              What this key sent
   tessil revoke <id>                Delete something this key sent
+
+  tessil portals [--json]           Portals this key was handed
+  tessil deliveries <portal>        What arrived in one, by name or ID  [--json]
+  tessil pull <portal> [--out dir]  Download what arrived; again later for what is new
   tessil logout                     Sign this machine out
 
 Files are encrypted on this machine before anything is uploaded.
@@ -97,6 +102,14 @@ async function run(): Promise<void> {
       return get(positional[0], { out: text("out") });
     case "list":
       return list({ json: flags.json === true });
+    case "portals":
+      return portals({ json: flags.json === true });
+    case "deliveries":
+      if (positional.length !== 1) throw new UserError("Usage: tessil deliveries <portal name or id> [--json]");
+      return deliveries(positional[0], { json: flags.json === true });
+    case "pull":
+      if (positional.length !== 1) throw new UserError("Usage: tessil pull <portal name or id> [--out <dir>]");
+      return pull(positional[0], { out: text("out") }, saveEncryptedFile);
     case "revoke":
       if (positional.length !== 1) throw new UserError("Usage: tessil revoke <id>");
       return revoke(positional[0]);

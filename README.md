@@ -24,6 +24,10 @@ tessil get <link> [--out <dir>]   Download and decrypt a link
 tessil list [--json]              What this key sent
 tessil revoke <id>                Delete something this key sent
 tessil logout                     Sign this machine out
+
+tessil portals [--json]           Portals this key was handed
+tessil deliveries <portal>        What arrived in one, by name or ID  [--json]
+tessil pull <portal> [--out dir]  Download what arrived; again later for what is new
 ```
 
 Links go to standard output and everything else to standard error, so
@@ -45,6 +49,25 @@ The result is an **access key**:
 
 What the tool remembers is kept in `~/.config/tessil/credentials.json`, readable only by you.
 `tessil logout` revokes the key on the server and removes the file.
+
+## Portals
+
+A key opens a portal only if you hand it that portal: under Settings, Access keys, tick
+"Read portals you pick" when approving, then choose the portals. Your browser seals each
+portal's keys for this key and signs them with your account's key; the tool refuses any
+that are not signed by the account it was paired with.
+
+`tessil pull "Tax 2025"` makes a folder per delivery, named by the reference both you and
+the sender have, with the files and a `record.txt`. Run it again later and it fetches only
+what is new, so it can run on a schedule as an archive of a portal whose files are deleted
+after a while.
+
+Portals are addressed by name or ID. The tool never prints a portal's link.
+
+Names, notes and file names in a delivery are written by whoever sent it. The tool strips
+anything that could redraw your terminal or point outside the folder, and `--json` puts
+all of it under `fromSender`, so a program reading the output can tell what a stranger
+wrote from what Tessil says.
 
 ## What the tool will not do
 

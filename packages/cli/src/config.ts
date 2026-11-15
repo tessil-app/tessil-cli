@@ -18,6 +18,13 @@ export interface Credentials {
   /** Wraps the keys of transfers this tool sent, so it can name them later. */
   secret: string;
   email: string;
+  /**
+   * The account this key works for and the public key it signs portal
+   * grants with, remembered from the first time the server named them. A
+   * grant signed by any other key is refused.
+   */
+  accountId?: string;
+  accountPublicKey?: string;
 }
 
 export const API_URL = (process.env.TESSIL_API_URL ?? "https://tessil.app").replace(/\/+$/, "");

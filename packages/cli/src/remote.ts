@@ -7,7 +7,7 @@ import { UserError, printable } from "./util";
 export interface SelfActive {
   status: "active";
   device: { id: string; name: string; permissions: string[]; expiresAt: string | null };
-  account: { email: string; tier: string; publicKey: string | null };
+  account: { id?: string; email: string; tier: string; publicKey: string | null };
   caps: { maxFileSize: number; maxTransferSize: number; allowedExpiryHours: number[] };
 }
 export type Self = SelfActive | { status: "pending"; pairingExpiresAt: string | null };
@@ -68,6 +68,46 @@ export function listOwnTransfers(token: string, cursor?: string) {
 
 export const deleteOwnTransfer = (token: string, id: string) =>
   call<void>(`/api/devices/self/transfers/${encodeURIComponent(id)}`, { method: "DELETE", token });
+
+export interface GrantedPortalRow {
+  id: string;
+  role: string;
+  publicBundle: string;
+  sealedKeys: string;
+  keyVersion: number;
+  isDisabled: boolean;
+  closesAt: string | null;
+  createdAt: string;
+  deliveries: number;
+  lastDeliveryAt: string | null;
+}
+
+export interface DepositRow {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  sealedKey: string;
+  encryptedTitle: string | null;
+  encryptedTitleIv: string | null;
+  files: { id: string; encryptedName: string; encryptedNameIv: string; fileIv: string; size: number; mimeType: string | null }[];
+}
+
+export const listGrantedPortals = (token: string) =>
+  call<{ portals: GrantedPortalRow[] }>("/api/devices/self/portals", { token });
+
+export function listPortalDeposits(token: string, portalId: string, cursor?: string | null) {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+  return call<{ deposits: DepositRow[]; nextCursor: string | null }>(
+    `/api/devices/self/portals/${encodeURIComponent(portalId)}/deposits${query}`,
+    { token },
+  );
+}
+
+export const portalFileUrl = (token: string, portalId: string, fileId: string) =>
+  call<{ downloadUrl: string; size: number }>(
+    `/api/devices/self/portals/${encodeURIComponent(portalId)}/files/${encodeURIComponent(fileId)}/url`,
+    { token },
+  );
 
 /** The shared client, signed in as this access key. */
 export function clientFor(credentials: Credentials): ApiClient {

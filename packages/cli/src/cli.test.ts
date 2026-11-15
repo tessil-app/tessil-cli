@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { base64UrlToBytes } from "@tessil/core/crypto/base64url";
 import { newDevice, unwrapTransferKey, wrapTransferKey } from "./device";
+import { namesOnDisk } from "./portals";
 import { describeHours, formatSize, parseHours, parseTransferLink, printable, safeFileName } from "./util";
 
 describe("a new access key", () => {
@@ -122,5 +123,29 @@ describe("text from elsewhere, before it reaches the terminal", () => {
   it("is applied to a downloaded file's name as well", () => {
     expect(safeFileName("ok\u001b[31m.txt")).toBe("ok[31m.txt");
     expect(safeFileName("invoice\u202Efdp.exe")).toBe("invoicefdp.exe");
+  });
+});
+
+describe("a delivery's folder on disk", () => {
+  it("is named by things that cannot leave the folder it is pulled into", () => {
+    // The portal's name comes from the account, the file names from a stranger.
+    expect(safeFileName("../../Tax 2025")).toBe("__.._Tax 2025");
+    expect(safeFileName("Tax 2025")).toBe("Tax 2025");
+    expect(safeFileName("..")).toBe("_");
+    expect(safeFileName(".complete")).toBe("_complete");
+  });
+
+  it("keeps two files of one name apart, and never lets one stand in for the record", () => {
+    const names = namesOnDisk([
+      { name: "scan.pdf" },
+      { name: "Scan.PDF" },
+      { name: "record.txt" },
+      { name: "scan.pdf" },
+      { name: "1-scan.pdf" },
+    ]).map((n) => n.name);
+    expect(names).toEqual(["scan.pdf", "1-Scan.PDF", "1-record.txt", "2-scan.pdf", "1-1-scan.pdf"]);
+    expect(new Set(names.map((n) => n.toLowerCase())).size).toBe(names.length);
+    // The same list gives the same names, so a second run finds what the first saved.
+    expect(namesOnDisk([{ name: "a" }, { name: "a" }]).map((n) => n.name)).toEqual(["a", "1-a"]);
   });
 });
