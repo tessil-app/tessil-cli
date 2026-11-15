@@ -2,9 +2,9 @@
 // another program might read goes to standard output, the rest to standard
 // error.
 
-import { createWriteStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { ApiError } from "@tessil/core/api/client";
@@ -82,6 +82,52 @@ function rangedBody(url: string, size: number, label: string): ReadableStream<Ui
       controller.enqueue(piece);
     },
   });
+}
+
+/**
+ * Downloads one stored file, decrypts it and writes it to `target`, which
+ * must not exist yet. Returns the size of what was written.
+ */
+export async function saveEncryptedFile(
+  url: string,
+  storedSize: number,
+  fileIv: string,
+  key: CryptoKey,
+  target: string,
+  label: string,
+): Promise<number> {
+  // Fetched a stretch at a time. Memory then stays at one stretch however
+  // fast the connection is and however large the file.
+  const rest = rangedBody(url, storedSize, label);
+  const reader = rest.getReader();
+  const first = await reader.read();
+  const head = first.value ?? new Uint8Array(0);
+  reader.releaseLock();
+  const body = prepend(head, rest);
+
+  // Written beside the target under a name no sender can choose (theirs
+  // never start with a dot), and moved into place only when whole. A
+  // download that was cut off leaves no file that looks finished.
+  const part = join(dirname(target), `.${basename(target)}.part`);
+  rmSync(part, { force: true });
+  let written: number;
+  try {
+    // Today's chunked format, or the older one that is decrypted whole.
+    if (isStreamingFormat(head)) {
+      await pipeline(Readable.fromWeb(streamingDecrypt(body, storedSize, key) as never), createWriteStream(part, { flags: "wx" }));
+      written = plaintextSize(storedSize);
+    } else {
+      const plain = await decryptFile(await new Response(body).arrayBuffer(), fileIv, key);
+      await Bun.write(part, plain);
+      written = plain.size;
+    }
+    if (existsSync(target)) throw new UserError(`${label} is already there; nothing was replaced.`);
+    renameSync(part, target);
+  } catch (err) {
+    rmSync(part, { force: true });
+    throw err;
+  }
+  return written;
 }
 
 /** `first`, then the rest of `stream`. For looking at the start of a stream without losing it. */
@@ -169,7 +215,7 @@ export async function login(options: { name?: string }): Promise<void> {
       break;
     }
     if (self.status === "active") {
-      saveCredentials({
+      const where = saveCredentials({
         apiUrl: API_URL,
         deviceId: self.device.id,
         name: self.device.name,
@@ -182,6 +228,15 @@ export async function login(options: { name?: string }): Promise<void> {
       say();
       say(`Paired with ${printable(self.account.email)} as "${printable(self.device.name)}".`);
       say(`It may: ${printable(self.device.permissions.join(", "))}.`);
+      say(
+        where === "keychain"
+          ? "Its secrets are in your system keychain."
+          : "Its secrets are in a file only you can read; this system has no keychain the tool can use.",
+      );
+      if (self.device.permissions.includes("portals:read")) {
+        say();
+        say("Before it can open portals, run `tessil trust` once to confirm your account's key.");
+      }
       return;
     }
   }
@@ -422,24 +477,8 @@ export async function get(link: string, options: { out?: string }): Promise<void
     const { downloadUrl } = await api.getDownloadUrl(file.id, accessToken).catch((err) => {
       throw explain(err);
     });
-    // Fetched a stretch at a time. Memory then stays at one stretch however
-    // fast the connection is and however large the file.
-    const rest = rangedBody(downloadUrl, file.size, stored);
-    const reader = rest.getReader();
-    const first = await reader.read();
-    const head = first.value ?? new Uint8Array(0);
-    reader.releaseLock();
-    const body = prepend(head, rest);
-
-    if (isStreamingFormat(head)) {
-      await pipeline(Readable.fromWeb(streamingDecrypt(body, file.size, key) as never), createWriteStream(target, { flags: "wx" }));
-      say(`  ${target}  (${formatSize(plaintextSize(file.size))})`);
-    } else {
-      const whole = await new Response(body).arrayBuffer();
-      const plain = await decryptFile(whole, file.fileIv, key);
-      await Bun.write(target, plain);
-      say(`  ${target}  (${formatSize(plain.size)})`);
-    }
+    const bytes = await saveEncryptedFile(downloadUrl, file.size, file.fileIv, key, target, stored);
+    say(`  ${target}  (${formatSize(bytes)})`);
     out(target);
   }
 }
