@@ -138,3 +138,32 @@ describe("where downloads go", () => {
     expect(mcp.downloadDir()).toMatch(/Downloads\/Tessil$/);
   });
 });
+
+describe("staying connected", () => {
+  // The MCP server reads its protocol from standard input for as long as it
+  // runs. Reading a file must never end that input (see fileFromDisk).
+  it("still has its standard input after reading a file while data arrives on it", async () => {
+    const file = join(dir, "payload.bin");
+    writeFileSync(file, new Uint8Array(200_000));
+    const script = `
+      import { fileFromDisk } from ${JSON.stringify(join(import.meta.dir, "commands.ts"))};
+      let ended = false;
+      process.stdin.on("data", () => {});
+      process.stdin.on("end", () => (ended = true));
+      await new Promise((r) => setTimeout(r, 150));
+      const disk = fileFromDisk(${JSON.stringify(file)});
+      await disk.head.arrayBuffer();
+      const reader = disk.asFile.stream().getReader();
+      let bytes = 0;
+      for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length; }
+      await new Promise((r) => setTimeout(r, 600));
+      console.log(JSON.stringify({ ended, bytes }));
+      process.exit(0);
+    `;
+    const child = Bun.spawn(["bun", "-e", script], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: process.env });
+    const feeder = setInterval(() => child.stdin.write("line\n"), 40);
+    const out = await new Response(child.stdout).text();
+    clearInterval(feeder);
+    expect(JSON.parse(out.trim())).toEqual({ ended: false, bytes: 200_000 });
+  });
+});

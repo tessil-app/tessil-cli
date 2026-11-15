@@ -23,7 +23,7 @@ tessil send <file>...             Encrypt and upload, print a link
     --quiet                         Print only the link
 tessil get <link> [--out <dir>]   Download and decrypt a link
 tessil list [--json]              What this key sent
-tessil link <id>                  Print the link of something this key sent
+tessil link <id> [--copy]         Show the link of something this key sent
 tessil revoke <id>                Delete something this key sent
 tessil logout                     Sign this machine out
 
@@ -109,6 +109,11 @@ What is different from the commands, on purpose:
   the assistant only that it did. On a machine without a clipboard, run `tessil link <id>`
   yourself. To hand an assistant a file someone sent you, copy the link and ask it to
   fetch what is on your clipboard.
+- **What this does not cover.** An assistant that can also run shell commands as you can
+  do what you can: read the clipboard, or run `tessil send` itself and read the link it
+  prints. `tessil link` refuses to print to anything but a terminal for that reason, but
+  the real boundary is which commands you let the assistant run. Through these tools
+  alone, it never sees a link.
 - **No tool takes a link, a key, a password or a folder.** Downloads go to
   `~/Downloads/Tessil`, or to the `downloadDir` you set in `~/.config/tessil/mcp.json`.
 - **No tool returns what is inside a file.** Whether the assistant reads a downloaded file

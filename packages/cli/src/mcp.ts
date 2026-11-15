@@ -163,7 +163,7 @@ export function buildServer(version: string): McpServer {
           expires_at: sent.expiresAt,
           link: copied
             ? "Copied to the user's clipboard."
-            : `Not shown here, and this machine has no clipboard. The user can print it themselves with: tessil link ${sent.id}`,
+            : `Not shown here, and this machine has no clipboard. The user can see it by running this in their own terminal: tessil link ${sent.id}`,
         };
       }),
   );

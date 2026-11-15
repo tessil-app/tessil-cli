@@ -13,7 +13,14 @@ const SERVICE = "app.tessil.cli";
 
 function run(command: string, args: string[], input?: string): { ok: boolean; out: string } {
   try {
-    const result = spawnSync(command, args, { input, encoding: "utf8", timeout: 15_000, shell: false });
+    // Never left to inherit this program's standard input: the MCP server
+    // reads its protocol from it.
+    const result = spawnSync(command, args, {
+      ...(input === undefined ? { stdio: ["ignore", "pipe", "ignore"] as const } : { input }),
+      encoding: "utf8",
+      timeout: 15_000,
+      shell: false,
+    });
     return { ok: result.status === 0, out: (result.stdout ?? "").trim() };
   } catch {
     return { ok: false, out: "" };

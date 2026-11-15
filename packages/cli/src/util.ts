@@ -193,7 +193,14 @@ export function readClipboard(): string | null {
   if (process.env.TESSIL_NO_CLIPBOARD) return null;
   for (const [command, args] of clipboardCommand(false)) {
     try {
-      const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000, shell: false });
+      // Its input is closed off. Left to inherit, the command would share this
+      // program's standard input, which the MCP server is reading its protocol from.
+      const result = spawnSync(command, args, {
+        encoding: "utf8",
+        timeout: 5000,
+        shell: false,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
       if (result.status === 0) return result.stdout.trim();
     } catch {
       // Try the next one.

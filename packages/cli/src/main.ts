@@ -18,7 +18,7 @@ Usage
       --quiet                         Print only the link
   tessil get <link> [--out <dir>]   Download and decrypt a link
   tessil list [--json]              What this key sent
-  tessil link <id>                  Print the link of something this key sent
+  tessil link <id> [--copy]         Show the link of something this key sent, to a terminal or the clipboard
   tessil revoke <id>                Delete something this key sent
 
   tessil trust                      Confirm your account's key, once, before using portals
@@ -111,7 +111,7 @@ async function run(): Promise<void> {
       return;
     case "link":
       if (positional.length !== 1) throw new UserError("Usage: tessil link <id>");
-      await link(positional[0]);
+      await link(positional[0], { copy: flags.copy === true });
       return;
     case "list":
       return list({ json: flags.json === true });
