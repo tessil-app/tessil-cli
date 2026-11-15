@@ -41,6 +41,7 @@ import {
   askHidden,
   describeHours,
   formatSize,
+  io,
   openInBrowser,
   parseHours,
   parseTransferLink,
@@ -148,8 +149,8 @@ function prepend(first: Uint8Array, stream: ReadableStream<Uint8Array>): Readabl
     cancel: (reason) => reader.cancel(reason),
   });
 }
-const say = (line = "") => process.stderr.write(`${line}\n`);
-const out = (line: string) => process.stdout.write(`${line}\n`);
+const say = (line = "") => io.say(line);
+const out = (line: string) => io.out(line);
 
 function need(): Credentials {
   const credentials = loadCredentials();
@@ -288,7 +289,16 @@ function fileFromDisk(path: string): { blob: Blob; name: string; size: number } 
   return { blob: Bun.file(full), name: basename(full), size: stat.size };
 }
 
-export async function send(paths: string[], options: SendOptions): Promise<string> {
+export interface Sent {
+  id: string;
+  link: string;
+  files: { name: string; size: number }[];
+  totalBytes: number;
+  hours: number;
+  expiresAt: string;
+}
+
+export async function send(paths: string[], options: SendOptions): Promise<Sent> {
   if (paths.length === 0) throw new UserError("Nothing to send. Usage: tessil send <file> [more files]");
   const credentials = need();
   const self = await active(credentials);
@@ -342,6 +352,7 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
   const encryptedTitle = title ? await encryptString(title, key) : null;
 
   let transferId: string;
+  let expiresAt: string;
   try {
     const created = await api.createTransfer(
       hours,
@@ -350,6 +361,7 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
       encryptedTitle ? { encryptedTitle: encryptedTitle.ciphertext, encryptedTitleIv: encryptedTitle.iv } : null,
     );
     transferId = created.transferId;
+    expiresAt = created.expiresAt;
   } catch (err) {
     throw explain(err);
   }
@@ -413,12 +425,20 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
     say();
   }
   out(link);
-  return link;
+  return {
+    id: transferId,
+    link,
+    files: files.map((f) => ({ name: f.name, size: f.size })),
+    totalBytes: total,
+    hours,
+    expiresAt,
+  };
 }
 
 // ─── get ────────────────────────────────────────────────────────────────────
 
-export async function get(link: string, options: { out?: string }): Promise<void> {
+/** Downloads and decrypts a link. Returns where each file was saved. */
+export async function get(link: string, options: { out?: string }): Promise<string[]> {
   // Fetching needs nothing from the account, but the tool is for accounts.
   need();
   const parsed = parseTransferLink(link);
@@ -460,6 +480,7 @@ export async function get(link: string, options: { out?: string }): Promise<void
 
   const files = meta.files ?? [];
   if (files.length === 0) throw new UserError("That transfer has no files.");
+  const saved: string[] = [];
   const title =
     meta.encryptedTitle && meta.encryptedTitleIv
       ? await decryptString(meta.encryptedTitle, meta.encryptedTitleIv, key).catch(() => null)
@@ -480,12 +501,26 @@ export async function get(link: string, options: { out?: string }): Promise<void
     const bytes = await saveEncryptedFile(downloadUrl, file.size, file.fileIv, key, target, stored);
     say(`  ${target}  (${formatSize(bytes)})`);
     out(target);
+    saved.push(target);
   }
+  return saved;
 }
 
 // ─── list, revoke ───────────────────────────────────────────────────────────
 
-export async function list(options: { json?: boolean }): Promise<void> {
+export interface SentRow {
+  id: string;
+  title: string | null;
+  files: number;
+  size: number;
+  downloads: number;
+  expiresAt: string;
+  complete: boolean;
+  password: boolean;
+}
+
+/** What this key sent and still exists, with titles it can read itself. */
+export async function sentTransfers(): Promise<SentRow[]> {
   const credentials = need();
   let res;
   try {
@@ -493,7 +528,7 @@ export async function list(options: { json?: boolean }): Promise<void> {
   } catch (err) {
     throw explain(err);
   }
-  const rows = [];
+  const rows: SentRow[] = [];
   for (const t of res.transfers) {
     let title: string | null = null;
     const raw = t.wrappedKey
@@ -505,7 +540,7 @@ export async function list(options: { json?: boolean }): Promise<void> {
     }
     rows.push({
       id: t.id,
-      title,
+      title: title ? printable(title) : null,
       files: t.fileCount,
       size: t.totalBytes,
       downloads: t.downloadCount,
@@ -514,6 +549,11 @@ export async function list(options: { json?: boolean }): Promise<void> {
       password: t.hasPassword,
     });
   }
+  return rows;
+}
+
+export async function list(options: { json?: boolean }): Promise<void> {
+  const rows = await sentTransfers();
   if (options.json) {
     out(JSON.stringify(rows, null, 2));
     return;
@@ -532,10 +572,38 @@ export async function list(options: { json?: boolean }): Promise<void> {
         formatSize(r.size).padEnd(9),
         `${r.downloads} ${r.downloads === 1 ? "download" : "downloads"}`.padEnd(12),
         lifetime.padEnd(9),
-        r.title ? printable(r.title) : r.complete ? "" : "(not finished)",
+        r.title ?? (r.complete ? "" : "(not finished)"),
       ].join("  "),
     );
   }
+}
+
+/**
+ * The link of something this key sent, built again from the key it kept.
+ * For a person at a terminal: how a link reaches them when an assistant
+ * did the sending and was not given it.
+ */
+export async function link(id: string): Promise<string> {
+  const credentials = need();
+  if (!/^[A-Za-z0-9_-]{21}$/.test(id)) throw new UserError("Give the transfer's ID, as shown by `tessil list`.");
+  let res;
+  try {
+    res = await listOwnTransfers(credentials.token);
+  } catch (err) {
+    throw explain(err);
+  }
+  const row = res.transfers.find((t) => t.id === id);
+  if (!row) throw new UserError("No transfer of this access key has that ID.");
+  if (row.hasPassword) {
+    throw new UserError("That transfer has a password, and its link was made with it. It cannot be rebuilt here.");
+  }
+  const raw = row.wrappedKey
+    ? await unwrapTransferKey(credentials.secret, credentials.deviceId, id, row.wrappedKey)
+    : null;
+  if (!raw) throw new UserError("This machine no longer has the key for that transfer.");
+  const built = `${WEB_URL}/d/${id}#${bytesToBase64Url(raw)}`;
+  out(built);
+  return built;
 }
 
 export async function revoke(id: string): Promise<void> {

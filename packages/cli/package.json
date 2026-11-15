@@ -4,8 +4,12 @@
   "description": "Send and fetch end-to-end encrypted files from a terminal. The command-line tool for tessil.app.",
   "license": "AGPL-3.0-only",
   "type": "module",
-  "bin": { "tessil": "./src/main.ts" },
+  "bin": {
+    "tessil": "./src/main.ts"
+  },
   "dependencies": {
-    "@tessil/core": "workspace:*"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@tessil/core": "workspace:*",
+    "zod": "^4.6.7"
   }
 }

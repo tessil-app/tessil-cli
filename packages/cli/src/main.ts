@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // tessil: send and fetch end-to-end encrypted files from a terminal.
 
-import { get, list, login, logout, revoke, saveEncryptedFile, send, whoami } from "./commands";
+import { get, link, list, login, logout, revoke, saveEncryptedFile, send, whoami } from "./commands";
 import { deliveries, portals, pull, trust } from "./portals";
 import { UserError } from "./util";
 
@@ -18,6 +18,7 @@ Usage
       --quiet                         Print only the link
   tessil get <link> [--out <dir>]   Download and decrypt a link
   tessil list [--json]              What this key sent
+  tessil link <id>                  Print the link of something this key sent
   tessil revoke <id>                Delete something this key sent
 
   tessil trust                      Confirm your account's key, once, before using portals
@@ -25,6 +26,8 @@ Usage
   tessil deliveries <portal>        What arrived in one, by name or ID  [--json]
   tessil pull <portal> [--out dir]  Download what arrived; again later for what is new
   tessil logout                     Sign this machine out
+
+  tessil mcp                        Run as an MCP server for an AI assistant
 
 Files are encrypted on this machine before anything is uploaded.
 The server never sees their contents, their names or the key in the link.
@@ -77,6 +80,10 @@ async function run(): Promise<void> {
   const text = (name: string) => (typeof flags[name] === "string" ? (flags[name] as string) : undefined);
 
   switch (command) {
+    case "mcp": {
+      const [{ runMcpServer }, { version }] = await Promise.all([import("./mcp"), import("../package.json")]);
+      return runMcpServer(version);
+    }
     case "login":
       return login({ name: text("name") });
     case "logout":
@@ -100,7 +107,12 @@ async function run(): Promise<void> {
     }
     case "get":
       if (positional.length !== 1) throw new UserError("Usage: tessil get <link> [--out <dir>]");
-      return get(positional[0], { out: text("out") });
+      await get(positional[0], { out: text("out") });
+      return;
+    case "link":
+      if (positional.length !== 1) throw new UserError("Usage: tessil link <id>");
+      await link(positional[0]);
+      return;
     case "list":
       return list({ json: flags.json === true });
     case "trust":
@@ -112,7 +124,8 @@ async function run(): Promise<void> {
       return deliveries(positional[0], { json: flags.json === true });
     case "pull":
       if (positional.length !== 1) throw new UserError("Usage: tessil pull <portal name or id> [--out <dir>]");
-      return pull(positional[0], { out: text("out") }, saveEncryptedFile);
+      await pull(positional[0], { out: text("out") }, saveEncryptedFile);
+      return;
     case "revoke":
       if (positional.length !== 1) throw new UserError("Usage: tessil revoke <id>");
       return revoke(positional[0]);
