@@ -38,12 +38,22 @@ export function parseTransferLink(input: string): ParsedLink | null {
   return match ? { id: match[1], fragment: match[2] } : null;
 }
 
-/** A file name with nothing that could place it outside the folder it is saved in. */
+/**
+ * A file name with nothing that could place it outside the folder it is
+ * saved in, and that never starts with a dot: names that do are the
+ * tool's own (its completion marker, its temporary files), and "." and
+ * ".." are not names at all. Spaces around a name are dropped first, so
+ * they cannot hide a dot from that rule.
+ */
 export function safeFileName(name: string): string {
-  const cleaned = printable(name)
-    .replace(/[/\\]/g, "_")
-    .replace(/^\.+/, "_")
-    .trim();
+  let cleaned = printable(name).replace(/[/\\]/g, "_").trim();
+  // Until nothing changes: " . .x" must not come out as ".x".
+  for (let before = ""; before !== cleaned; ) {
+    before = cleaned;
+    cleaned = cleaned.replace(/^\.+/, "_").trim();
+  }
+  // Windows drops trailing dots and spaces, which would make two names one.
+  cleaned = cleaned.replace(/[. ]+$/, "");
   return cleaned.length > 0 ? cleaned.slice(0, 240) : "file";
 }
 
@@ -87,6 +97,21 @@ export function openInBrowser(address: string): void {
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Reads one line typed at the terminal. For a question a script must not answer. */
+export async function askLine(question: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new UserError("This needs a person at a terminal. From a script, pass --fingerprint with the code read from the dashboard.");
+  }
+  process.stderr.write(question);
+  process.stdin.resume();
+  return new Promise((resolve) => {
+    process.stdin.once("data", (chunk: Buffer) => {
+      process.stdin.pause();
+      resolve(chunk.toString("utf8"));
+    });
+  });
 }
 
 /** Reads one line typed at the terminal, without showing it. */

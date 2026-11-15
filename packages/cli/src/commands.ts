@@ -224,10 +224,6 @@ export async function login(options: { name?: string }): Promise<void> {
         publicKey: device.publicKey,
         secret: device.secret,
         email: self.account.email,
-        // Portal grants must be signed by this key from now on.
-        ...(self.account.id && self.account.publicKey
-          ? { accountId: self.account.id, accountPublicKey: self.account.publicKey }
-          : {}),
       });
       say();
       say(`Paired with ${printable(self.account.email)} as "${printable(self.device.name)}".`);
@@ -237,6 +233,10 @@ export async function login(options: { name?: string }): Promise<void> {
           ? "Its secrets are in your system keychain."
           : "Its secrets are in a file only you can read; this system has no keychain the tool can use.",
       );
+      if (self.device.permissions.includes("portals:read")) {
+        say();
+        say("Before it can open portals, run `tessil trust` once to confirm your account's key.");
+      }
       return;
     }
   }

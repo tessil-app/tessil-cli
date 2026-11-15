@@ -25,6 +25,7 @@ tessil list [--json]              What this key sent
 tessil revoke <id>                Delete something this key sent
 tessil logout                     Sign this machine out
 
+tessil trust                      Confirm your account's key, once, before using portals
 tessil portals [--json]           Portals this key was handed
 tessil deliveries <portal>        What arrived in one, by name or ID  [--json]
 tessil pull <portal> [--out dir]  Download what arrived; again later for what is new
@@ -59,6 +60,12 @@ A key opens a portal only if you hand it that portal: under Settings, Access key
 "Read portals you pick" when approving, then choose the portals. Your browser seals each
 portal's keys for this key and signs them with your account's key; the tool refuses any
 that are not signed by the account it was paired with.
+
+Before the first use, run `tessil trust`. It shows the fingerprint of your account's key as
+the server reports it, and asks whether the Access keys page shows the same. Only then does
+the tool accept portals signed by that key. It never takes the key on the server's word
+alone, because whoever names that key decides which portals the tool believes are yours.
+From a script: `tessil trust --fingerprint "<the code from the page>"`.
 
 `tessil pull "Tax 2025"` makes a folder per delivery, named by the reference both you and
 the sender have, with the files and a `record.txt`. Run it again later and it fetches only

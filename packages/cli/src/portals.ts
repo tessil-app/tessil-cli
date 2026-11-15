@@ -7,7 +7,7 @@
 // and before they become a path on disk.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { base64UrlToBytes } from "@tessil/core/crypto/base64url";
 import { decryptFilename, decryptString } from "@tessil/core/crypto/decrypt";
 import { openSealed, type RecipientKeypair } from "@tessil/core/crypto/seal";
@@ -25,7 +25,8 @@ import {
   type DepositRow,
   type GrantedPortalRow,
 } from "./remote";
-import { UserError, formatSize, printable, safeFileName } from "./util";
+import { publicKeyFingerprint } from "@tessil/core/vault/keypair";
+import { UserError, askLine, formatSize, printable, safeFileName } from "./util";
 
 const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
 const buf = (b: Uint8Array) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
@@ -52,24 +53,62 @@ export interface OpenDelivery {
 }
 
 /**
- * The account's ID and public key, as first reported by the server and
- * remembered since. Portal grants must be signed by this key. If the
- * server later names another, the grants are not opened: either the vault
- * was replaced, and the key should be paired again, or something is wrong.
+ * The account's ID and the public key it signs portal grants with. A
+ * person confirmed that key once, by comparing its fingerprint with the
+ * one their dashboard shows (`tessil trust`, or at the end of `login`).
+ * It is never taken from the server on the server's word alone: whoever
+ * names the key decides which grants this tool believes.
  */
-async function pinnedAccount(credentials: Credentials): Promise<{ userId: string; publicKey: Uint8Array }> {
-  if (credentials.accountId && credentials.accountPublicKey) {
-    return { userId: credentials.accountId, publicKey: base64UrlToBytes(credentials.accountPublicKey) };
+function pinnedAccount(credentials: Credentials): { userId: string; publicKey: Uint8Array } {
+  if (!credentials.accountId || !credentials.accountPublicKey) {
+    throw new UserError(
+      "This key has not been told which account key to trust for portals. Run `tessil trust` once and compare the code it shows with the one on the Access keys page.",
+    );
   }
+  return { userId: credentials.accountId, publicKey: base64UrlToBytes(credentials.accountPublicKey) };
+}
+
+/**
+ * Shows the fingerprint of the account key the server names and pins it
+ * only when a person says it matches their dashboard, or supplies the
+ * fingerprint they read there.
+ */
+export async function trust(options: { fingerprint?: string }): Promise<void> {
+  const credentials = need();
   const self = await getSelf(credentials.token).catch((err) => {
     throw explain(err);
   });
   if (self.status !== "active") throw new UserError("This access key is still waiting to be approved.");
   if (!self.account.id || !self.account.publicKey) {
-    throw new UserError("Your account has no vault yet, so it has no portals to hand to this key.");
+    throw new UserError("Your account has no vault yet, so there is no account key and no portals to hand to this key.");
   }
+  const fingerprint = await publicKeyFingerprint(base64UrlToBytes(self.account.publicKey));
+  const normal = (text: string) => text.toLowerCase().replace(/[^0-9a-f]/g, "");
+
+  if (credentials.accountPublicKey === self.account.publicKey && credentials.accountId === self.account.id) {
+    say(`Already trusted: ${fingerprint}`);
+    return;
+  }
+  if (credentials.accountPublicKey) {
+    say("The server now names a different account key than the one you confirmed before.");
+    say("That happens when a vault is replaced. If you did not do that, stop here.");
+  }
+  let confirmed: boolean;
+  if (options.fingerprint !== undefined) {
+    confirmed = normal(options.fingerprint) === normal(fingerprint);
+    if (!confirmed) throw new UserError("That is not the key the server names for your account. Nothing was changed.");
+  } else {
+    say("Your account's key, as the server reports it:");
+    say();
+    say(`  ${fingerprint}`);
+    say();
+    say("Open Settings, Access keys in your browser. It shows \"Your account's key\".");
+    const answer = await askLine("Is it exactly the same? [y/N] ");
+    confirmed = /^y(es)?$/i.test(answer.trim());
+  }
+  if (!confirmed) throw new UserError("Not confirmed. Nothing was changed.");
   saveCredentials({ ...credentials, accountId: self.account.id, accountPublicKey: self.account.publicKey });
-  return { userId: self.account.id, publicKey: base64UrlToBytes(self.account.publicKey) };
+  say("Trusted. Portals handed to this key are accepted only when signed by that key.");
 }
 
 async function deviceKeypair(credentials: Credentials): Promise<RecipientKeypair> {
@@ -96,7 +135,8 @@ export async function openPortals(credentials: Credentials): Promise<{ portals: 
     throw explain(err);
   }
   if (rows.length === 0) return { portals: [], unreadable: 0 };
-  const [account, keypair] = await Promise.all([pinnedAccount(credentials), deviceKeypair(credentials)]);
+  const account = pinnedAccount(credentials);
+  const keypair = await deviceKeypair(credentials);
   const portals: OpenPortal[] = [];
   for (const row of rows) {
     // Opens only if sealed for this key by the account's own key.
@@ -342,6 +382,11 @@ export async function pull(
     mkdirSync(folder, { recursive: true });
     for (const { file, name } of namesOnDisk(d.files)) {
       const target = join(folder, name);
+      // Whatever the name went through, it must be a plain file directly in
+      // this delivery's folder and not one of the tool's own.
+      if (dirname(target) !== folder || name.startsWith(".") || name === RECORD_FILE) {
+        throw new UserError(`A file in ${d.reference} has a name that cannot be saved safely.`);
+      }
       // Already whole from an earlier run that was interrupted later on.
       if (existsSync(target)) continue;
       const { downloadUrl } = await portalFileUrl(credentials.token, portal.id, file.id).catch((err) => {

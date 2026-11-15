@@ -138,6 +138,19 @@ describe("a delivery's folder on disk", () => {
     expect(safeFileName(".complete")).toBe("_complete");
   });
 
+  it("is not fooled by spaces around a dot, and never returns a dot name", () => {
+    for (const name of [" .complete", "\t.complete", " . .complete", " ..", ".", "..", " . ", "\u200e.complete", "..  ..x"]) {
+      const safe = safeFileName(name);
+      expect(safe.startsWith(".")).toBe(false);
+      expect(safe).not.toBe("");
+      expect(safe).not.toContain("/");
+    }
+    expect(safeFileName(" .complete")).toBe("_complete");
+    expect(safeFileName(" ..")).toBe("_");
+    expect(safeFileName("report. ")).toBe("report");
+    expect(safeFileName("  spaced name.pdf  ")).toBe("spaced name.pdf");
+  });
+
   it("keeps two files of one name apart, and never lets one stand in for the record", () => {
     const names = namesOnDisk([
       { name: "scan.pdf" },
