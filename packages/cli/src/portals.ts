@@ -26,12 +26,12 @@ import {
   type GrantedPortalRow,
 } from "./remote";
 import { publicKeyFingerprint } from "@tessil/core/vault/keypair";
-import { UserError, askLine, formatSize, printable, safeFileName } from "./util";
+import { UserError, askLine, formatSize, io, printable, safeFileName } from "./util";
 
 const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
 const buf = (b: Uint8Array) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
-const say = (line = "") => process.stderr.write(`${line}\n`);
-const out = (line: string) => process.stdout.write(`${line}\n`);
+const say = (line = "") => io.say(line);
+const out = (line: string) => io.out(line);
 
 export interface OpenPortal {
   id: string;
@@ -356,11 +356,20 @@ export async function deliveries(wanted: string, options: { json?: boolean }): P
   }
 }
 
+export interface Pulled {
+  portal: OpenPortal;
+  root: string;
+  /** Deliveries saved by this run. */
+  deliveries: { delivery: OpenDelivery; folder: string }[];
+  /** Deliveries that were already there. */
+  skipped: number;
+}
+
 export async function pull(
   wanted: string,
   options: { out?: string },
   save: (url: string, storedSize: number, fileIv: string, key: CryptoKey, target: string, label: string) => Promise<number>,
-): Promise<void> {
+): Promise<Pulled> {
   const credentials = need();
   const portal = await findPortal(credentials, wanted);
   const all = await openDeliveries(credentials, portal);
@@ -369,6 +378,7 @@ export async function pull(
 
   let fetched = 0;
   let skipped = 0;
+  const saved: Pulled["deliveries"] = [];
   for (const d of all) {
     // One folder per delivery, named by the reference both sides have. A
     // marker says it is complete, so a second run brings only what is new
@@ -411,8 +421,10 @@ export async function pull(
     );
     writeFileSync(marker, `${new Date().toISOString()}\n`);
     fetched += 1;
+    saved.push({ delivery: d, folder });
   }
   say(
     `${portal.title}: ${fetched} ${fetched === 1 ? "delivery" : "deliveries"} saved to ${root}${skipped > 0 ? `, ${skipped} already there` : ""}.`,
   );
+  return { portal, root, deliveries: saved, skipped };
 }

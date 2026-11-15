@@ -6,7 +6,8 @@ Send and fetch end-to-end encrypted files from a terminal. The command-line tool
 Files are encrypted on your machine before anything is uploaded. The server never sees their
 contents, their names, or the key in the link.
 
-> **Status: early.** Not published yet. The server side is live; the page where you approve
+> **Status: early.** Not published yet, so `tessil` below means `bun run dev --` or the
+> program from `bun run build`. The server side is live; the page where you approve
 > the tool is not linked from the site until this is released.
 
 ## What it does
@@ -22,6 +23,7 @@ tessil send <file>...             Encrypt and upload, print a link
     --quiet                         Print only the link
 tessil get <link> [--out <dir>]   Download and decrypt a link
 tessil list [--json]              What this key sent
+tessil link <id> [--copy]         Show the link of something this key sent
 tessil revoke <id>                Delete something this key sent
 tessil logout                     Sign this machine out
 
@@ -78,6 +80,49 @@ Names, notes and file names in a delivery are written by whoever sent it. The to
 anything that could redraw your terminal or point outside the folder, and `--json` puts
 all of it under `fromSender`, so a program reading the output can tell what a stranger
 wrote from what Tessil says.
+
+## For an AI assistant (MCP)
+
+`tessil mcp` runs the same commands as an MCP server, for assistants that can start a
+program on your machine, such as Claude Code or the Claude desktop app. It uses the access
+key from `tessil login`, with the permissions you gave it.
+
+Claude Code:
+
+```bash
+claude mcp add tessil -- tessil mcp
+```
+
+Others, in their MCP configuration:
+
+```json
+{ "mcpServers": { "tessil": { "command": "tessil", "args": ["mcp"] } } }
+```
+
+The tools: `status`, `send_files`, `list_sent`, `revoke_transfer`, `fetch_from_clipboard`,
+`list_portals`, `list_deliveries`, `pull_deliveries`.
+
+What is different from the commands, on purpose:
+
+- **The assistant never gets a link.** What an assistant sees is kept by whoever runs the
+  model, and a link holds the key. `send_files` puts the link on your clipboard and tells
+  the assistant only that it did. On a machine without a clipboard, run `tessil link <id>`
+  yourself. To hand an assistant a file someone sent you, copy the link and ask it to
+  fetch what is on your clipboard.
+- **What this does not cover.** An assistant that can also run shell commands as you can
+  do what you can: read the clipboard, or run `tessil send` itself and read the link it
+  prints. `tessil link` refuses to print to anything but a terminal for that reason, but
+  the real boundary is which commands you let the assistant run. Through these tools
+  alone, it never sees a link.
+- **No tool takes a link, a key, a password or a folder.** Downloads go to
+  `~/Downloads/Tessil`, or to the `downloadDir` you set in `~/.config/tessil/mcp.json`.
+- **No tool returns what is inside a file.** Whether the assistant reads a downloaded file
+  is up to the assistant's own file permissions, where you can see and decide it.
+- **What a sender wrote is marked.** Notes, answers and file names from a delivery come
+  back under `from_sender` with a warning, cleaned and cut to 300 characters. A note that
+  says "ignore your instructions" is a note.
+- **It runs only on your machine.** There is no hosted version; one would have to hold
+  your keys.
 
 ## What the tool will not do
 

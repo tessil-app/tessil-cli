@@ -1,6 +1,16 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 export class UserError extends Error {}
+
+/**
+ * Where the commands print. Results go to standard output, everything said
+ * to a person to standard error. A program that speaks a protocol on
+ * standard output, as the MCP server does, replaces both.
+ */
+export const io = {
+  out: (line: string): void => void process.stdout.write(`${line}\n`),
+  say: (line = ""): void => void process.stderr.write(`${line}\n`),
+};
 
 /** "7d", "12h", "90m" to whole hours. Null when it is not a duration. */
 export function parseHours(input: string): number | null {
@@ -144,4 +154,57 @@ export async function askHidden(question: string): Promise<string> {
     };
     process.stdin.on("data", onData);
   });
+}
+
+function clipboardCommand(write: boolean): [string, string[]][] {
+  if (process.platform === "darwin") return [[write ? "pbcopy" : "pbpaste", []]];
+  if (process.platform === "win32") {
+    return write ? [["clip.exe", []]] : [["powershell.exe", ["-NoProfile", "-Command", "Get-Clipboard"]]];
+  }
+  return write
+    ? [
+        ["wl-copy", []],
+        ["xclip", ["-selection", "clipboard"]],
+        ["xsel", ["--clipboard", "--input"]],
+      ]
+    : [
+        ["wl-paste", ["--no-newline"]],
+        ["xclip", ["-selection", "clipboard", "-o"]],
+        ["xsel", ["--clipboard", "--output"]],
+      ];
+}
+
+/** Puts text on the clipboard. False where there is none, such as a server. */
+export function copyToClipboard(text: string): boolean {
+  if (process.env.TESSIL_NO_CLIPBOARD) return false;
+  for (const [command, args] of clipboardCommand(true)) {
+    try {
+      // On standard input, so it is not an argument other programs can see.
+      const result = spawnSync(command, args, { input: text, timeout: 5000, shell: false });
+      if (result.status === 0) return true;
+    } catch {
+      // Try the next one.
+    }
+  }
+  return false;
+}
+
+export function readClipboard(): string | null {
+  if (process.env.TESSIL_NO_CLIPBOARD) return null;
+  for (const [command, args] of clipboardCommand(false)) {
+    try {
+      // Its input is closed off. Left to inherit, the command would share this
+      // program's standard input, which the MCP server is reading its protocol from.
+      const result = spawnSync(command, args, {
+        encoding: "utf8",
+        timeout: 5000,
+        shell: false,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      if (result.status === 0) return result.stdout.trim();
+    } catch {
+      // Try the next one.
+    }
+  }
+  return null;
 }

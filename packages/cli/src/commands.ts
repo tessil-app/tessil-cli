@@ -2,7 +2,18 @@
 // another program might read goes to standard output, the rest to standard
 // error.
 
-import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -39,8 +50,10 @@ import {
 import {
   UserError,
   askHidden,
+  copyToClipboard,
   describeHours,
   formatSize,
+  io,
   openInBrowser,
   parseHours,
   parseTransferLink,
@@ -148,8 +161,8 @@ function prepend(first: Uint8Array, stream: ReadableStream<Uint8Array>): Readabl
     cancel: (reason) => reader.cancel(reason),
   });
 }
-const say = (line = "") => process.stderr.write(`${line}\n`);
-const out = (line: string) => process.stdout.write(`${line}\n`);
+const say = (line = "") => io.say(line);
+const out = (line: string) => io.out(line);
 
 function need(): Credentials {
   const credentials = loadCredentials();
@@ -279,16 +292,58 @@ export interface SendOptions {
   quiet?: boolean;
 }
 
-/** A file on disk as the shared code wants it: a Blob with a name. */
-function fileFromDisk(path: string): { blob: Blob; name: string; size: number } {
+export interface DiskFile {
+  name: string;
+  size: number;
+  type: string;
+  /** The first bytes, for telling a program or script from anything else. */
+  head: Blob;
+  /** What the shared code needs of a browser's File: a size and a stream. */
+  asFile: File;
+}
+
+/**
+ * A file on disk as the shared code wants it.
+ *
+ * It is read with Node's stream, not with `Bun.file(...).stream()`. In Bun
+ * 1.3, finishing the latter while data is arriving on standard input ends
+ * standard input, and standard input is what the MCP server lives on: it
+ * quit after every upload. `fs.openAsBlob` behaves the same way.
+ */
+export function fileFromDisk(path: string): DiskFile {
   const full = resolve(path);
   if (!existsSync(full)) throw new UserError(`No such file: ${path}`);
   const stat = statSync(full);
   if (stat.isDirectory()) throw new UserError(`${path} is a folder. Put it in an archive first, then send that.`);
-  return { blob: Bun.file(full), name: basename(full), size: stat.size };
+  const start = Buffer.alloc(Math.min(stat.size, 512));
+  const fd = openSync(full, "r");
+  try {
+    readSync(fd, start, 0, start.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    name: basename(full),
+    size: stat.size,
+    type: Bun.file(full).type,
+    head: new Blob([start]),
+    asFile: {
+      size: stat.size,
+      stream: () => Readable.toWeb(createReadStream(full)) as unknown as ReadableStream<Uint8Array>,
+    } as unknown as File,
+  };
 }
 
-export async function send(paths: string[], options: SendOptions): Promise<string> {
+export interface Sent {
+  id: string;
+  link: string;
+  files: { name: string; size: number }[];
+  totalBytes: number;
+  hours: number;
+  expiresAt: string;
+}
+
+export async function send(paths: string[], options: SendOptions): Promise<Sent> {
   if (paths.length === 0) throw new UserError("Nothing to send. Usage: tessil send <file> [more files]");
   const credentials = need();
   const self = await active(credentials);
@@ -318,7 +373,7 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
       throw new UserError(`${file.name} is ${formatSize(file.size)}. Your plan allows ${formatSize(self.caps.maxFileSize)} per file.`);
     }
     // The same rule as the website: no programs and no scripts.
-    const blocked = await blockedKind(file.blob);
+    const blocked = await blockedKind(file.head);
     if (blocked) {
       throw new UserError(
         `${file.name} is ${blocked === "script" ? "a script" : "a program"}, which Tessil does not carry as it is. Put it in an archive and send that.`,
@@ -342,6 +397,7 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
   const encryptedTitle = title ? await encryptString(title, key) : null;
 
   let transferId: string;
+  let expiresAt: string;
   try {
     const created = await api.createTransfer(
       hours,
@@ -350,6 +406,7 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
       encryptedTitle ? { encryptedTitle: encryptedTitle.ciphertext, encryptedTitleIv: encryptedTitle.iv } : null,
     );
     transferId = created.transferId;
+    expiresAt = created.expiresAt;
   } catch (err) {
     throw explain(err);
   }
@@ -367,10 +424,10 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
       (file) => file.size,
       async (file, i, signal) => {
         const { encryptedName, iv } = await encryptFilename(file.name, key);
-        const encryptor = encryptFileStream(file.blob as File, key);
+        const encryptor = encryptFileStream(file.asFile, key);
         const init = await api.initMultipartUpload({
           transferId,
-          contentType: file.blob.type || "application/octet-stream",
+          contentType: file.type || "application/octet-stream",
           encryptedName,
           encryptedNameIv: iv,
           fileIv: encryptor.ivB64,
@@ -413,12 +470,20 @@ export async function send(paths: string[], options: SendOptions): Promise<strin
     say();
   }
   out(link);
-  return link;
+  return {
+    id: transferId,
+    link,
+    files: files.map((f) => ({ name: f.name, size: f.size })),
+    totalBytes: total,
+    hours,
+    expiresAt,
+  };
 }
 
 // ─── get ────────────────────────────────────────────────────────────────────
 
-export async function get(link: string, options: { out?: string }): Promise<void> {
+/** Downloads and decrypts a link. Returns where each file was saved. */
+export async function get(link: string, options: { out?: string }): Promise<string[]> {
   // Fetching needs nothing from the account, but the tool is for accounts.
   need();
   const parsed = parseTransferLink(link);
@@ -460,6 +525,7 @@ export async function get(link: string, options: { out?: string }): Promise<void
 
   const files = meta.files ?? [];
   if (files.length === 0) throw new UserError("That transfer has no files.");
+  const saved: string[] = [];
   const title =
     meta.encryptedTitle && meta.encryptedTitleIv
       ? await decryptString(meta.encryptedTitle, meta.encryptedTitleIv, key).catch(() => null)
@@ -480,12 +546,26 @@ export async function get(link: string, options: { out?: string }): Promise<void
     const bytes = await saveEncryptedFile(downloadUrl, file.size, file.fileIv, key, target, stored);
     say(`  ${target}  (${formatSize(bytes)})`);
     out(target);
+    saved.push(target);
   }
+  return saved;
 }
 
 // ─── list, revoke ───────────────────────────────────────────────────────────
 
-export async function list(options: { json?: boolean }): Promise<void> {
+export interface SentRow {
+  id: string;
+  title: string | null;
+  files: number;
+  size: number;
+  downloads: number;
+  expiresAt: string;
+  complete: boolean;
+  password: boolean;
+}
+
+/** What this key sent and still exists, with titles it can read itself. */
+export async function sentTransfers(): Promise<SentRow[]> {
   const credentials = need();
   let res;
   try {
@@ -493,7 +573,7 @@ export async function list(options: { json?: boolean }): Promise<void> {
   } catch (err) {
     throw explain(err);
   }
-  const rows = [];
+  const rows: SentRow[] = [];
   for (const t of res.transfers) {
     let title: string | null = null;
     const raw = t.wrappedKey
@@ -505,7 +585,7 @@ export async function list(options: { json?: boolean }): Promise<void> {
     }
     rows.push({
       id: t.id,
-      title,
+      title: title ? printable(title) : null,
       files: t.fileCount,
       size: t.totalBytes,
       downloads: t.downloadCount,
@@ -514,6 +594,11 @@ export async function list(options: { json?: boolean }): Promise<void> {
       password: t.hasPassword,
     });
   }
+  return rows;
+}
+
+export async function list(options: { json?: boolean }): Promise<void> {
+  const rows = await sentTransfers();
   if (options.json) {
     out(JSON.stringify(rows, null, 2));
     return;
@@ -532,10 +617,48 @@ export async function list(options: { json?: boolean }): Promise<void> {
         formatSize(r.size).padEnd(9),
         `${r.downloads} ${r.downloads === 1 ? "download" : "downloads"}`.padEnd(12),
         lifetime.padEnd(9),
-        r.title ? printable(r.title) : r.complete ? "" : "(not finished)",
+        r.title ?? (r.complete ? "" : "(not finished)"),
       ].join("  "),
     );
   }
+}
+
+/**
+ * The link of something this key sent, built again from the key it kept.
+ * For a person at a terminal: how a link reaches them when an assistant
+ * did the sending and was not given it.
+ */
+export async function link(id: string, options: { copy?: boolean } = {}): Promise<string> {
+  const credentials = need();
+  if (!/^[A-Za-z0-9_-]{21}$/.test(id)) throw new UserError("Give the transfer's ID, as shown by `tessil list`.");
+  let res;
+  try {
+    res = await listOwnTransfers(credentials.token);
+  } catch (err) {
+    throw explain(err);
+  }
+  const row = res.transfers.find((t) => t.id === id);
+  if (!row) throw new UserError("No transfer of this access key has that ID.");
+  if (row.hasPassword) {
+    throw new UserError("That transfer has a password, and its link was made with it. It cannot be rebuilt here.");
+  }
+  const raw = row.wrappedKey
+    ? await unwrapTransferKey(credentials.secret, credentials.deviceId, id, row.wrappedKey)
+    : null;
+  if (!raw) throw new UserError("This machine no longer has the key for that transfer.");
+  const built = `${WEB_URL}/d/${id}#${bytesToBase64Url(raw)}`;
+  // This command exists so a person can get a link an assistant was not
+  // given. Run by a program, with its output captured, it would hand the
+  // link straight back to that program.
+  if (options.copy) {
+    if (!copyToClipboard(built)) throw new UserError("This machine has no clipboard the tool can use.");
+    say("Copied to your clipboard.");
+  } else if (process.stdout.isTTY) {
+    out(built);
+  } else {
+    throw new UserError("`tessil link` prints only to a terminal. Use `tessil link <id> --copy` to put it on the clipboard.");
+  }
+  return built;
 }
 
 export async function revoke(id: string): Promise<void> {
