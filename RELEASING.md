@@ -36,6 +36,22 @@ with a warning and the rest still runs, so a release can be made before all of t
 The Homebrew tap is a separate repository, `tessil-app/homebrew-tap`, which must exist
 (empty is fine) before the first release that updates it.
 
+## When npm or Homebrew fails
+
+The downloads, npm and Homebrew are separate jobs; one failing does not stop the others.
+To send a release that already exists to npm and Homebrew again, without rebuilding it:
+
+```bash
+gh workflow run release.yml -R tessil-app/tessil-cli -f tag=v0.1.0
+```
+
+Both steps do nothing when their work is already done, so this is safe to repeat.
+
+The npm token has to be allowed to create the package the first time. A granular token
+limited to named packages, or to the `@tessil` scope, cannot publish the unscoped `tessil`:
+choose "All packages" with read and write, or publish the first version from a classic
+automation token and narrow it afterwards.
+
 ## Without the Apple secrets
 
 The macOS programs get an ad-hoc signature. That is enough for Homebrew and for the install
