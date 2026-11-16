@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "bin": {
-    "tessil": "./dist/tessil.js"
+    "tessil": "dist/tessil.js"
   },
   "files": [
     "dist/tessil.js",
