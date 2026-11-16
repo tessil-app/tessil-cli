@@ -6,9 +6,20 @@ Send and fetch end-to-end encrypted files from a terminal. The command-line tool
 Files are encrypted on your machine before anything is uploaded. The server never sees their
 contents, their names, or the key in the link.
 
-> **Status: early.** Not published yet, so `tessil` below means `bun run dev --` or the
-> program from `bun run build`. The server side is live; the page where you approve
-> the tool is not linked from the site until this is released.
+## Install
+
+```bash
+brew install tessil-app/tap/tessil                # macOS and Linux, with Homebrew
+curl -fsSL https://raw.githubusercontent.com/tessil-app/tessil-cli/main/install.sh | sh   # macOS and Linux
+npx tessil help                                   # anywhere with Node 20 or newer
+```
+
+Or download the program for your system from the
+[releases](https://github.com/tessil-app/tessil-cli/releases), where every file is listed
+with its checksum. The install script checks that checksum and installs nothing if it does
+not match.
+
+Then `tessil login`.
 
 ## What it does
 
@@ -148,7 +159,10 @@ bun install
 bun test
 bun run dev -- help          # run from source
 bun run build                # one self-contained program in dist/tessil
+bun run build:npm            # the single file that goes to npm, for Node
 ```
+
+How a release is made is in [RELEASING.md](RELEASING.md).
 
 Against a server of your own:
 

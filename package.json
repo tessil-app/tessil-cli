@@ -12,7 +12,8 @@
     "sync-core": "bun run scripts/sync-core.ts",
     "dev": "bun run packages/cli/src/main.ts",
     "build": "bun build packages/cli/src/main.ts --compile --outfile dist/tessil && (test \"$(uname)\" != Darwin || codesign --force --sign - dist/tessil)",
-    "prepare": "lefthook install || true"
+    "prepare": "lefthook install || true",
+    "build:npm": "bun run --cwd packages/cli build"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.0.0",

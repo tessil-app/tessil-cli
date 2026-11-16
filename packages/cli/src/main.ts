@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 // tessil: send and fetch end-to-end encrypted files from a terminal.
 
 import { get, link, list, login, logout, revoke, saveEncryptedFile, send, whoami } from "./commands";
